@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/python2
 
 # Copyright (c) Barefoot Networks, Inc.
 # Licensed under the Apache License, Version 2.0 (the "License")
@@ -11,6 +11,7 @@
 #
 # Main entry point.
 
+from __future__ import print_function
 import argparse
 import os
 import traceback
@@ -46,6 +47,12 @@ def process(input_args):
         else:
             has_remaining_args = True
 
+    if args.output_file == "-":
+        gen_file = sys.stdout
+        sys.stdout = sys.stderr
+    else:
+        gen_file = open(args.output_file, "w")
+
     # trigger error
     if has_remaining_args:
         parser.parse_args(input_args)
@@ -55,10 +62,10 @@ def process(input_args):
     elif args.generated == "filter":
         isRouter = False
     else:
-        print("-g should be one of 'filter' or 'router'")
+        print("-g should be one of 'filter' or 'router'", file=sys.stderr)
 
-    print("*** Compiling ", args.source)
-    return compileP4(args.source, args.output_file, isRouter, preprocessor_args)
+    print("*** Compiling ", args.source, file=sys.stderr)
+    return compileP4(args.source, gen_file, isRouter, preprocessor_args)
 
 
 class CompileResult(object):
@@ -89,8 +96,7 @@ def compileP4(inputFile, gen_file, isRouter, preprocessor_args):
         e = EbpfProgram(basename, h, isRouter, config)
         serializer = ProgramSerializer()
         e.toC(serializer)
-        f = open(gen_file, 'w')
-        f.write(serializer.toString())
+        gen_file.write(serializer.toString())
         return CompileResult("OK", "")
     except CompilationException, e:
         prefix = ""
@@ -107,4 +113,4 @@ def compileP4(inputFile, gen_file, isRouter, preprocessor_args):
 if __name__ == "__main__":
     result = process(sys.argv[1:])
     if result.kind != "OK":
-        print(str(result))
+        print(str(result), file=sys.stderr)
