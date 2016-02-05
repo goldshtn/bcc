@@ -43,8 +43,9 @@ class EbpfProgram(object):
         # all array tables must be indexed with u32 values
 
         self.errorName = self.reservedPrefix + "error"
-        self.functionName = self.reservedPrefix + "filter"
+        self.functionName = "handle_rx"
         self.egressPortName = "egress_port" # Hardwired in P4 definition
+        self.mdName = self.reservedPrefix + "md"
 
         self.typeFactory = typeFactory.EbpfTypeFactory(config)
         self.errorCodes = [
@@ -154,8 +155,9 @@ class EbpfProgram(object):
         self.config.serializeCodeSection(serializer)
         serializer.newline()
         serializer.emitIndent()
-        serializer.appendFormat("int {0}(struct __sk_buff* {1}) ",
-                                self.functionName, self.packetName)
+        serializer.appendFormat("static int {0}(void *{1}, " +
+                                "struct metadata *{2}) ", self.functionName,
+                                self.packetName, self.mdName)
         serializer.blockStart()
 
         self.generateHeaderInstance(serializer)
@@ -188,25 +190,24 @@ class EbpfProgram(object):
             serializer.newline()
         elif isinstance(self.config, target.BccConfig):
             if self.isRouter:
-                serializer.appendFormat("if (!{0})", self.dropBit)
-                serializer.newline()
-                serializer.increaseIndent()
+                serializer.appendFormat("if (!{0}) ", self.dropBit)
+                serializer.blockStart()
                 serializer.emitIndent()
                 serializer.appendFormat(
-                    "bpf_clone_redirect({0}, {1}.standard_metadata.{2}, 0);",
-                    self.packetName, self.metadataStructName,
-                    self.egressPortName)
+                    "pkt_redirect({0}, {1}, {2}.standard_metadata.{3});",
+                    self.packetName, self.mdName,
+                    self.metadataStructName, self.egressPortName)
                 serializer.newline()
-                serializer.decreaseIndent()
 
                 serializer.emitIndent()
-                serializer.appendLine(
-                    "return TC_ACT_SHOT /* drop packet; clone is forwarded */;")
-            else:
-                serializer.appendFormat(
-                    "return {1} ? TC_ACT_SHOT : TC_ACT_PIPE;",
-                    self.dropBit)
-                serializer.newline()
+                serializer.appendLine("return RX_REDIRECT;")
+                serializer.blockEnd(True)
+
+            serializer.emitIndent()
+            serializer.appendFormat(
+                "return {0} ? RX_DROP : RX_OK;",
+                self.dropBit)
+            serializer.newline()
         else:
             raise CompilationException(
                 True, "Unexpected target configuration {0}",

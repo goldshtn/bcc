@@ -63,7 +63,7 @@ class EbpfTableKeyField(object):
                 raise NotSupportedException(
                     "{0} Mask wider than 32 bits", self.field.hlirType)
             serializer.appendFormat(
-                "memcpy(&{0}, &{1}, {2});", destination, source, size / 8)
+                "__builtin_memcpy(&{0}, &{1}, {2});", destination, source, size / 8)
 
         serializer.newline()
 

@@ -261,9 +261,9 @@ class EbpfParser(object):
             serializer.newline()
             return
 
-        serializer.appendFormat("if ({0}->len < BYTES({1} + {2})) ",
-                                program.packetName,
-                                program.offsetVariableName, width)
+        serializer.appendFormat("if ({0}->pktlen < BYTES({1} + {2})) ",
+                                program.mdName, program.offsetVariableName,
+                                width)
         serializer.blockStart()
         serializer.emitIndent()
         serializer.appendFormat("{0} = p4_pe_header_too_short;",
@@ -419,7 +419,7 @@ class EbpfParser(object):
                 True, "Unexpected type for parse_call.set {0}", value)
 
         if useMemcpy:
-            serializer.appendFormat("memcpy(&{0}, &{1}, {2})",
+            serializer.appendFormat("__builtin_memcpy(&{0}, &{1}, {2})",
                                     destination, source, bytesToCopy)
         else:
             serializer.appendFormat("{0} = {1}", destination, source)

@@ -221,7 +221,7 @@ class EbpfAction(EbpfActionBase):
                     raise NotSupportedException(
                         "Constants wider than 32-bit: {0}({1})",
                         src.caller, src.asString)
-                serializer.appendFormat("memcpy(&{0}, &{1}, {2});",
+                serializer.appendFormat("__builtin_memcpy(&{0}, &{1}, {2});",
                                         dst.asString,
                                         src.asString,
                                         size / 8)

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-header_type ethernet_t {
+header_type p4_ethernet_t {
     fields {
         dstAddr : 48;
         srcAddr : 48;
@@ -22,7 +22,7 @@ header_type ethernet_t {
     }
 }
 
-header_type ipv4_t {
+header_type p4_ipv4_t {
     fields {
         version : 4;
         ihl : 4;
@@ -45,7 +45,7 @@ parser start {
 
 #define ETHERTYPE_IPV4 0x0800
 
-header ethernet_t ethernet;
+header p4_ethernet_t ethernet;
 
 parser parse_ethernet {
     extract(ethernet);
@@ -55,7 +55,7 @@ parser parse_ethernet {
     }
 }
 
-header ipv4_t ipv4;
+header p4_ipv4_t ipv4;
 
 /* Not yet supported on EBPF target
 
