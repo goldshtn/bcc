@@ -1,0 +1,39 @@
+Demonstrations of btrace.
+
+
+# btrace -p 2785 '::BEGIN { print("starting trace"); } p:c:pthread_mutex_lock(void *mutex) /$pid == $target/ { tlocal void *mut = mutex; tlocal u64 ts = $timestamp; } r:c:pthread_mutex_lock /$pid == $target && mut/ { u64 elapsed = ts - $timestamp; if (elapsed > 100000) @slow[mut] = sum(elapsed); } ::END { printa(@slow); }'
+
+Attached to process 2785, tracing... Press Ctrl+C to stop.
+starting trace
+^C
+        mut                sum
+        0x30bedc         43099
+        0x30ffa0        178144
+
+# btrace 'p:c:pthread_mutex_lock { tlocal u64 ts = $timestamp; } r:c:pthread_mutex_lock /ts/ { u64 elapsed = ts - $timestamp; if (elapsed > 100000) @stacks[$pid, $stack(5)] = count(); } ::tick-5s { printa(@stacks); trunc(@stacks); }'
+
+Attached system-wide, tracing... Press Ctrl+C to stop.
+[10:53:04]
+        $pid        $stack(5)                           count
+        2785        app:acquire_lock+0x12               1189
+                    app:do_process+0x44
+                    app:main+0x8
+                    libc:__libc_start_main+0x87
+
+        2785        app:acquire_lock+0x12               4891
+                    app:update_stats+0x4
+                    app:main+0x8
+                    libc:__libc_start_main+0x87
+[10:53:09]
+        ...
+
+# btrace 'p:c:pthread_mutex_lock { tlocal u64 ts = $timestamp; } r:c:pthread_mutex_lock /ts/ { @times = hist_log(ts/1000); }'
+
+Attached system-wide, tracing... Press Ctrl+C to stop.
+^C
+        @times  count   distribution
+        0 -> 1      0   |                      |
+        2 -> 3      0   |                      |
+        4 -> 7     14   |**                    |
+        8 -> 15   103   |**********************|
+
