@@ -105,10 +105,11 @@ int __trace_entry_update(struct pt_regs *ctx)
 }
 """
 
-        def __init__(self, category, event, tp_id):
+        def __init__(self, category, event, tp_id=-1):
                 self.category = category
                 self.event = event
-                self.tp_id = tp_id
+                self.tp_id = tp_id if tp_id != -1 else \
+                             Tracepoint.get_tpoint_id(category, event)
                 self._retrieve_struct_fields()
 
         def _retrieve_struct_fields(self):
@@ -135,8 +136,8 @@ int __trace_entry_update(struct pt_regs *ctx)
                         text += "        %s %s;\n" % (field_type, field_name)
                 return text
 
-        def generate_struct(self):
-                self.struct_name = self.event + "_trace_entry"
+        def generate_struct(self, struct_name=None):
+                self.struct_name = struct_name or (self.event + "_trace_entry")
                 return """
 struct %s {
         u64 __do_not_use__;

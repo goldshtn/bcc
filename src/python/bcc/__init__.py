@@ -142,6 +142,15 @@ class BPF(object):
                     raise Exception("Could not find file %s" % filename)
         return filename
 
+    def _generate_tracepoint_structs(self, text):
+        new_text = ""
+        tp_rgx = r'\(struct TP__(\S+)__(\S+)'
+        for tp_category, tp_name in re.findall(tp_rgx, text, re.MULTILINE):
+            tp = Tracepoint(tp_category, tp_name)
+            new_text += tp.generate_struct("TP__%s__%s" %
+                                           (tp_category, tp_name))
+        return new_text + text
+
     def __init__(self, src_file="", hdr_file="", text=None, cb=None, debug=0, cflags=[]):
         """Create a a new BPF module with the given source code.
 
@@ -167,9 +176,11 @@ class BPF(object):
         cflags_array = (ct.c_char_p * len(cflags))()
         for i, s in enumerate(cflags): cflags_array[i] = s.encode("ascii")
         if text:
+            text = self._generate_tracepoint_structs(text)
             self.module = lib.bpf_module_create_c_from_string(text.encode("ascii"),
                     self.debug, cflags_array, len(cflags_array))
         else:
+            # TODO Generate tracepoint structs when src_file is specified too
             src_file = BPF._find_file(src_file)
             hdr_file = BPF._find_file(hdr_file)
             if src_file.endswith(".b"):
