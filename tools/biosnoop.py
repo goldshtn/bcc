@@ -2,150 +2,199 @@
 # @lint-avoid-python-3-compatibility-imports
 #
 # biosnoop  Trace block device I/O and print details including issuing PID.
-#       For Linux, uses BCC, eBPF.
+#           For Linux, uses BCC, eBPF.
 #
-# This uses in-kernel eBPF maps to cache process details (PID and comm) by I/O
-# request, as well as a starting timestamp for calculating I/O latency.
+# USAGE: biosnoop [-h] [-Q]
 #
 # Copyright (c) 2015 Brendan Gregg.
 # Licensed under the Apache License, Version 2.0 (the "License")
 #
-# 16-Sep-2015   Brendan Gregg   Created this.
-# 11-Feb-2016   Allan McAleavy  updated for BPF_PERF_OUTPUT
+# 16-Sep-2015   Brendan Gregg     Created this.
+# 11-Feb-2016   Allan McAleavy    Updated for BPF_PERF_OUTPUT.
+# 03-Apr-2017   Sasha Goldshtein  Migrated to use kernel tracepoints.
 
 from __future__ import print_function
 from bcc import BPF
+import argparse
 import ctypes as ct
 import re
 
+# arguments
+examples = """examples:
+    ./biosnoop          # trace block device I/O
+    ./biosnoop -Q       # trace block device I/O including queue latency
+"""
+parser = argparse.ArgumentParser(description=
+    "Trace block device I/O and print details including issuing PID.",
+    formatter_class=argparse.RawDescriptionHelpFormatter,
+    epilog=examples)
+parser.add_argument("-Q", "--queued", action="store_true", dest="queue",
+    help="include OS queued time in I/O time")
+args = parser.parse_args()
+
 # load BPF program
-b = BPF(text="""
+program = """
 #include <uapi/linux/ptrace.h>
 #include <linux/blkdev.h>
 
+struct key_t {
+    dev_t dev;
+    sector_t sector;
+};
+
 struct val_t {
-    u32 pid;
-    char name[TASK_COMM_LEN];
+    u64 tgid_pid;
+    u64 start_ts;
+#ifdef QUEUE_TIME
+    u64 queue_ts;
+#endif
+    u32 bytes;
+    char comm[TASK_COMM_LEN];
 };
 
 struct data_t {
-    u32 pid;
-    u64 rwflag;
+    u64 tgid_pid;
     u64 delta;
     u64 sector;
     u64 len;
-    u64 ts;
-    char disk_name[DISK_NAME_LEN];
-    char name[TASK_COMM_LEN];
+    u64 complete_ts;
+    u32 major;
+    u32 minor;
+    char rwbs[8];
+    char comm[TASK_COMM_LEN];
+#ifdef QUEUE_TIME
+    u64 queue_delta;
+#endif
 };
 
-BPF_HASH(start, struct request *);
-BPF_HASH(infobyreq, struct request *, struct val_t);
+BPF_HASH(start, struct key_t, struct val_t);
 BPF_PERF_OUTPUT(events);
 
-// cache PID and comm by-req
-int trace_pid_start(struct pt_regs *ctx, struct request *req)
+#ifdef QUEUE_TIME
+TRACEPOINT_PROBE(block, block_rq_insert)
 {
+    struct key_t key = {};
+    key.dev = args->dev;
+    key.sector = args->sector;
+
     struct val_t val = {};
+    val.queue_ts = bpf_ktime_get_ns();
+    val.tgid_pid = bpf_get_current_pid_tgid();
+    bpf_get_current_comm(&val.comm, sizeof(val.comm));
 
-    if (bpf_get_current_comm(&val.name, sizeof(val.name)) == 0) {
-        val.pid = bpf_get_current_pid_tgid();
-        infobyreq.update(&req, &val);
+    start.update(&key, &val);
+
+    return 0;
+}
+#endif
+
+TRACEPOINT_PROBE(block, block_rq_issue)
+{
+    struct key_t key = {};
+    key.dev = args->dev;
+    key.sector = args->sector;
+
+    struct val_t val = {}, *valp;
+#ifdef QUEUE_TIME
+    valp = start.lookup(&key);
+    if (valp == 0) {
+        // missed enqueue
+        return 0;
     }
+    val = *valp;
+#else
+    bpf_get_current_comm(&val.comm, sizeof(val.comm));
+    val.tgid_pid = bpf_get_current_pid_tgid();
+#endif
+    val.start_ts = bpf_ktime_get_ns();
+    val.bytes = args->nr_sector << 9;
+    if (val.bytes == 0) {
+        val.bytes = args->bytes;
+    }
+
+    start.update(&key, &val);
+
     return 0;
 }
 
-// time block I/O
-int trace_req_start(struct pt_regs *ctx, struct request *req)
+TRACEPOINT_PROBE(block, block_rq_complete)
 {
-    u64 ts;
+    struct key_t key = {};
+    key.dev = args->dev;
+    key.sector = args->sector;
 
-    ts = bpf_ktime_get_ns();
-    start.update(&req, &ts);
-
-    return 0;
-}
-
-// output
-int trace_req_completion(struct pt_regs *ctx, struct request *req)
-{
-    u64 *tsp, delta;
-    u32 *pidp = 0;
     struct val_t *valp;
     struct data_t data = {};
     u64 ts;
 
-    // fetch timestamp and calculate delta
-    tsp = start.lookup(&req);
-    if (tsp == 0) {
+    valp = start.lookup(&key);
+    if (valp == 0) {
         // missed tracing issue
         return 0;
     }
     ts = bpf_ktime_get_ns();
-    data.delta = ts - *tsp;
-    data.ts = ts / 1000;
-
-    valp = infobyreq.lookup(&req);
-    if (valp == 0) {
-        data.len = req->__data_len;
-        strcpy(data.name, "?");
-    } else {
-        data.pid = valp->pid;
-        data.len = req->__data_len;
-        data.sector = req->__sector;
-        bpf_probe_read(&data.name, sizeof(data.name), valp->name);
-        bpf_probe_read(&data.disk_name, sizeof(data.disk_name),
-                       req->rq_disk->disk_name);
-    }
-
-/*
- * The following deals with a kernel version change (in mainline 4.7, although
- * it may be backported to earlier kernels) with how block request write flags
- * are tested. We handle both pre- and post-change versions here. Please avoid
- * kernel version tests like this as much as possible: they inflate the code,
- * test, and maintenance burden.
- */
-#ifdef REQ_WRITE
-    data.rwflag = !!(req->cmd_flags & REQ_WRITE);
-#elif defined(REQ_OP_SHIFT)
-    data.rwflag = !!((req->cmd_flags >> REQ_OP_SHIFT) == REQ_OP_WRITE);
-#else
-    data.rwflag = !!((req->cmd_flags & REQ_OP_MASK) == REQ_OP_WRITE);
+    data.delta = ts - valp->start_ts;
+#ifdef QUEUE_TIME
+    data.queue_delta = valp->start_ts - valp->queue_ts;
 #endif
+    data.complete_ts = ts;
+    data.tgid_pid = valp->tgid_pid;
+    data.len = valp->bytes;
+    data.sector = key.sector;
+    data.major = MAJOR(key.dev);
+    data.minor = MINOR(key.dev);
+    bpf_probe_read(&data.rwbs, sizeof(data.rwbs), args->rwbs);
+    bpf_probe_read(&data.comm, sizeof(data.comm), valp->comm);
 
-    events.perf_submit(ctx, &data, sizeof(data));
-    start.delete(&req);
-    infobyreq.delete(&req);
+    events.perf_submit(args, &data, sizeof(data));
+    start.delete(&key);
 
     return 0;
 }
-""", debug=0)
-b.attach_kprobe(event="blk_account_io_start", fn_name="trace_pid_start")
-b.attach_kprobe(event="blk_start_request", fn_name="trace_req_start")
-b.attach_kprobe(event="blk_mq_start_request", fn_name="trace_req_start")
-b.attach_kprobe(event="blk_account_io_completion",
-    fn_name="trace_req_completion")
+"""
+if args.queue:
+    program = "#define QUEUE_TIME\n" + program
+b = BPF(text=program)
 
 TASK_COMM_LEN = 16  # linux/sched.h
-DISK_NAME_LEN = 32  # linux/genhd.h
 
 class Data(ct.Structure):
     _fields_ = [
-        ("pid", ct.c_ulonglong),
-        ("rwflag", ct.c_ulonglong),
+        ("tgid_pid", ct.c_ulonglong),
         ("delta", ct.c_ulonglong),
-        ("sector", ct.c_ulonglong),
+        ("sector", ct.c_longlong),
         ("len", ct.c_ulonglong),
-        ("ts", ct.c_ulonglong),
-        ("disk_name", ct.c_char * DISK_NAME_LEN),
-        ("name", ct.c_char * TASK_COMM_LEN)
-    ]
+        ("complete_ts", ct.c_ulonglong),
+        ("major", ct.c_uint),
+        ("minor", ct.c_uint),
+        ("rwbs", ct.c_char * 8),
+        ("comm", ct.c_char * TASK_COMM_LEN)
+    ] + ([("queue_delta", ct.c_ulonglong)] if args.queue else [])
+
+diskname_cache = {}
+
+def dev_to_disk(major, minor):
+    if (major, minor) in diskname_cache:
+        return diskname_cache[(major, minor)]
+
+    for line in open("/proc/partitions").readlines():
+        if "major" in line: continue
+        parts = line.strip().split()
+        if len(parts) != 4: continue
+        mj, mn, name = int(parts[0]), int(parts[1]), parts[3]
+        diskname_cache[(mj, mn)] = name
+
+    return diskname_cache.get((major, minor), "[unknown]")
 
 # header
-print("%-14s %-14s %-6s %-7s %-2s %-9s %-7s %7s" % ("TIME(s)", "COMM", "PID",
-    "DISK", "T", "SECTOR", "BYTES", "LAT(ms)"))
+if args.queue:
+    print("%-14s %-14s %-6s %-7s %-4s %-9s %-7s %7s %7s" %
+         ("TIME(s)", "COMM", "PID", "DISK", "T", "SECTOR",
+          "BYTES", "LAT(ms)", "QLAT(ms)"))
+else:
+    print("%-14s %-14s %-6s %-7s %-4s %-9s %-7s %7s" %
+         ("TIME(s)", "COMM", "PID", "DISK", "T", "SECTOR", "BYTES", "LAT(ms)"))
 
-rwflg = ""
 start_ts = 0
 prev_ts = 0
 delta = 0
@@ -154,32 +203,31 @@ delta = 0
 def print_event(cpu, data, size):
     event = ct.cast(data, ct.POINTER(Data)).contents
 
-    val = -1
     global start_ts
     global prev_ts
     global delta
 
-    if event.rwflag == 1:
-        rwflg = "W"
-
-    if event.rwflag == 0:
-        rwflg = "R"
-
-    if not re.match(b'\?', event.name):
-        val = event.sector
+    disk_name = dev_to_disk(event.major, event.minor)
 
     if start_ts == 0:
         prev_ts = start_ts
 
     if start_ts == 1:
-        delta = float(delta) + (event.ts - prev_ts)
+        delta = float(delta) + (event.complete_ts - prev_ts)
 
-    print("%-14.9f %-14.14s %-6s %-7s %-2s %-9s %-7s %7.2f" % (
-        delta / 1000000, event.name.decode(), event.pid,
-        event.disk_name.decode(), rwflg, val,
-        event.len, float(event.delta) / 1000000))
+    if args.queue:
+        print("%-14.9f %-14.14s %-6s %-7s %-4s %-9d %-7d %7.3f %7.3f" % (
+            delta / 1000000000, event.comm.decode(), event.tgid_pid >> 32,
+            disk_name.decode(), event.rwbs.decode(), event.sector,
+            event.len, float(event.delta) / 1000000000,
+            float(event.queue_delta) / 1000000000))
+    else:
+        print("%-14.9f %-14.14s %-6s %-7s %-4s %-9d %-7d %7.3f" % (
+            delta / 1000000000, event.comm.decode(), event.tgid_pid >> 32,
+            disk_name.decode(), event.rwbs.decode(), event.sector,
+            event.len, float(event.delta) / 1000000000))
 
-    prev_ts = event.ts
+    prev_ts = event.complete_ts
     start_ts = 1
 
 # loop with callback to print_event
