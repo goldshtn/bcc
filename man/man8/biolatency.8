@@ -14,8 +14,10 @@ completion. A \-Q option can be used to include time queued in the kernel.
 This tool uses in-kernel eBPF maps for storing timestamps and the histogram,
 for efficiency.
 
-This works by tracing various kernel blk_*() functions using dynamic tracing,
-and will need updating to match any changes to these functions.
+This works by tracing kernel tracepoints in the 'block' category, which is a
+stable tracing API. Attaching BPF programs to tracepoints is only supported
+from Linux 4.7. An older version, which works on older Linux kernels, is in
+tools/old.
 
 Since this uses BPF, only the root user can use this tool.
 .SH REQUIREMENTS
@@ -90,7 +92,7 @@ example usage, output, and commentary for this tool.
 Linux
 .SH STABILITY
 Unstable - in development.
-.SH AUTHOR
-Brendan Gregg
+.SH AUTHORS
+Brendan Gregg, Sasha Goldshtein
 .SH SEE ALSO
-biosnoop(8)
+biosnoop(8), biotop(8)
